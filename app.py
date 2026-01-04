@@ -42,6 +42,42 @@ def oa_params(mailto: str) -> Dict[str, str]:
     return {"mailto": mailto} if mailto else {}
 
 
+def oa_headers(mailto: str = "") -> Dict[str, str]:
+    # Some platforms/providers behave better with explicit Accept + UA
+    ua = "JournalChecker/1.0"
+    if mailto:
+        ua += f" ({mailto})"
+    return {
+        "Accept": "application/json",
+        "User-Agent": ua,
+    }
+
+
+def safe_json(resp: requests.Response) -> Optional[dict]:
+    """Return parsed JSON dict, or None if response isn't JSON / cannot be parsed."""
+    ctype = (resp.headers.get("Content-Type") or "").lower()
+    if "json" not in ctype:
+        return None
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
+def to_api_openalex_url(maybe_id_or_url: str) -> str:
+    """
+    Convert OpenAlex canonical IDs like https://openalex.org/Ixxxxx
+    into API endpoint https://api.openalex.org/Ixxxxx.
+    If already an API url, keep it.
+    """
+    s = (maybe_id_or_url or "").strip()
+    if not s:
+        return ""
+    if s.startswith("https://openalex.org/"):
+        return s.replace("https://openalex.org/", f"{OPENALEX_BASE}/", 1)
+    return s
+
+
 # =========================
 # OpenAlex: source lookup
 # =========================
@@ -52,9 +88,10 @@ def openalex_source_by_issn(issn: str, mailto: str) -> Optional[Dict[str, Any]]:
         return None
     url = f"{OPENALEX_BASE}/sources"
     params = {"filter": f"issn:{issn}", "per-page": 5, **oa_params(mailto)}
-    r = requests.get(url, params=params, timeout=20)
+    r = requests.get(url, params=params, headers=oa_headers(mailto), timeout=20)
     r.raise_for_status()
-    results = r.json().get("results", []) or []
+    data = safe_json(r) or {}
+    results = data.get("results", []) or []
     return results[0] if results else None
 
 
@@ -65,21 +102,35 @@ def openalex_source_by_title(title: str, mailto: str) -> Optional[Dict[str, Any]
         return None
     url = f"{OPENALEX_BASE}/sources"
     params = {"search": q, "per-page": 10, **oa_params(mailto)}
-    r = requests.get(url, params=params, timeout=20)
+    r = requests.get(url, params=params, headers=oa_headers(mailto), timeout=20)
     r.raise_for_status()
-    results = r.json().get("results", []) or []
+    data = safe_json(r) or {}
+    results = data.get("results", []) or []
     return results[0] if results else None
 
 
 @st.cache_data(show_spinner=False, ttl=7 * 24 * 3600)
 def openalex_org_by_id(openalex_org_id: str, mailto: str) -> Optional[Dict[str, Any]]:
+    """
+    OpenAlex 'host_organization' is typically an OpenAlex canonical ID URL:
+      https://openalex.org/I...
+    That URL may return HTML. We must call the API endpoint:
+      https://api.openalex.org/I...
+    """
     if not openalex_org_id:
         return None
-    r = requests.get(openalex_org_id, params={**oa_params(mailto)}, timeout=20)
+
+    api_url = to_api_openalex_url(openalex_org_id)
+    if not api_url:
+        return None
+
+    r = requests.get(api_url, params={**oa_params(mailto)}, headers=oa_headers(mailto), timeout=20)
     if r.status_code == 404:
         return None
     r.raise_for_status()
-    return r.json()
+
+    data = safe_json(r)
+    return data
 
 
 def get_counts_2024_2025(source_obj: dict) -> Tuple[Optional[int], Optional[int]]:
@@ -122,11 +173,11 @@ def ror_org_by_url(ror_url: str) -> Optional[Dict[str, Any]]:
     if not s.startswith("http"):
         s = "https://" + s
     api_url = s.replace("https://ror.org/", "https://api.ror.org/organizations/")
-    r = requests.get(api_url, timeout=20)
+    r = requests.get(api_url, timeout=20, headers={"Accept": "application/json", "User-Agent": "JournalChecker/1.0"})
     if r.status_code == 404:
         return None
     r.raise_for_status()
-    return r.json()
+    return safe_json(r)
 
 
 def classify_owner(ror_json: dict, fallback_name: str = "") -> str:
@@ -189,7 +240,8 @@ def wikidata_zh_title_by_issn(issn: str) -> str:
     }
     r = requests.get(WIKIDATA_SPARQL, params={"query": query}, headers=headers, timeout=25)
     r.raise_for_status()
-    bindings = (r.json().get("results", {}).get("bindings", []) or [])
+    data = safe_json(r) or {}
+    bindings = (data.get("results", {}).get("bindings", []) or [])
     if not bindings:
         return ""
     return bindings[0].get("labelZH", {}).get("value", "") or ""
@@ -220,11 +272,13 @@ def lookup_one(q: str, mailto: str) -> Dict[str, Any]:
             "Query": q,
             "OpenAlex_Found": "No",
             "OpenAlex_Match_Mode": oa_match_mode,
+            "Journal_Title(OpenAlex)": "",
+            "ISSN_L(OpenAlex)": "",
             "OpenAlex_ID": "",
             "Website": "",
             "PubCount_2024": "",
             "PubCount_2025": "",
-            "Chinese_Title": "",
+            "Chinese_Title(Wikidata)": "",
             "Fields(OpenAlex_x_concepts)": "",
             "LegalOwner": "",
             "Owner_Type": "未知",
@@ -247,9 +301,11 @@ def lookup_one(q: str, mailto: str) -> Dict[str, Any]:
 
     if source_obj:
         oa_id = source_obj.get("id", "") or ""
-        evidence_url = oa_id
         display_name = source_obj.get("display_name", "") or ""
         website = source_obj.get("homepage_url", "") or ""
+
+        # Evidence URL: prefer API endpoint (more stable for review)
+        evidence_url = to_api_openalex_url(oa_id) if oa_id else ""
 
         c24, c25 = get_counts_2024_2025(source_obj)
         pub2024 = "" if c24 is None else int(c24)
