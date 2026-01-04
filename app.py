@@ -1,4 +1,4 @@
-# app.py
+# app.py  (CSV version: data/scopus_sources.csv)
 import os
 import re
 from io import BytesIO
@@ -41,6 +41,7 @@ def looks_like_issn(s: str) -> bool:
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """Export results to xlsx for download (uses openpyxl via pandas)."""
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Result")
@@ -48,15 +49,19 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 # =========================
-# Scopus index: load once
+# Scopus index: load once (CSV)
 # =========================
 @st.cache_data(show_spinner=False, ttl=7 * 24 * 3600)
-def load_scopus_index(path: str, mtime: float) -> pd.DataFrame:
-    if path.lower().endswith((".xlsx", ".xls")):
-        df = pd.read_excel(path, engine="openpyxl")
-    else:
+def load_scopus_index_csv(path: str, mtime: float) -> pd.DataFrame:
+    """
+    Load Scopus Source List from CSV (UTF-8 recommended).
+    mtime is used to auto-refresh cache when the file changes.
+    """
+    # Try UTF-8 first; fallback to latin1 if needed (rare)
+    try:
         df = pd.read_csv(path)
-
+    except UnicodeDecodeError:
+        df = pd.read_csv(path, encoding="latin1")
 
     required = ["Source Title", "Active or Inactive", "ISSN", "EISSN"]
     missing = [c for c in required if c not in df.columns]
@@ -154,8 +159,7 @@ def openalex_source_by_title(title: str, mailto: str) -> Optional[Dict[str, Any]
 def openalex_org_by_id(openalex_org_id: str, mailto: str) -> Optional[Dict[str, Any]]:
     if not openalex_org_id:
         return None
-    url = openalex_org_id  # already like https://openalex.org/Ixxxx
-    r = requests.get(url, params={**oa_params(mailto)}, timeout=20)
+    r = requests.get(openalex_org_id, params={**oa_params(mailto)}, timeout=20)
     if r.status_code == 404:
         return None
     r.raise_for_status()
@@ -415,19 +419,22 @@ st.caption("输入期刊名/ISSN（支持批量），返回 Scopus 收录状态�
 
 with st.sidebar:
     st.subheader("配置")
-    scopus_path = st.text_input("Scopus Source List 路径", value="data/scopus_sources.xlsx")
+    scopus_path = st.text_input("Scopus Source List 路径", value="data/scopus_sources.csv")
     mailto = st.text_input("OpenAlex mailto（建议填邮箱提升稳定性）", value="")
     st.divider()
     st.markdown("**输入格式**：一行一个期刊名或 ISSN。")
 
 # load scopus at startup
 if not os.path.exists(scopus_path):
-    st.error(f"找不到 Scopus Source List 文件：{scopus_path}\n\n请把 scopus_sources.xlsx 放到 data/ 目录，或在侧边栏填正确路径。")
+    st.error(
+        f"找不到 Scopus Source List 文件：{scopus_path}\n\n"
+        "请把 scopus_sources.csv 放到 data/ 目录，或在侧边栏填正确路径。"
+    )
     st.stop()
 
 mtime = os.path.getmtime(scopus_path)
 try:
-    df_scopus = load_scopus_index(scopus_path, mtime)
+    df_scopus = load_scopus_index_csv(scopus_path, mtime)
 except Exception as e:
     st.error(f"加载 Scopus Source List 失败：{e}")
     st.stop()
@@ -445,7 +452,7 @@ col1, col2, col3 = st.columns([1, 1, 3])
 with col1:
     run_btn = st.button("开始查询", type="primary")
 with col2:
-    show_scopus_hits = st.checkbox("显示 Scopus 命中明细（前50条）", value=False)
+    show_scopus_hits = st.checkbox("显示 Scopus 命中明细（第一条前50条）", value=False)
 with col3:
     st.caption("提示：如果你只查单个，也直接填一行即可。")
 
@@ -486,4 +493,3 @@ if run_btn:
             st.dataframe(hits[show_cols].head(50), use_container_width=True)
         else:
             st.write("无命中。")
-
