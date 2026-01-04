@@ -52,14 +52,11 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # =========================
 @st.cache_data(show_spinner=False, ttl=7 * 24 * 3600)
 def load_scopus_index(path: str, mtime: float) -> pd.DataFrame:
-    """
-    Load Scopus Source List into an indexable DataFrame.
-    mtime is used to auto-refresh cache when the file changes.
-    """
     if path.lower().endswith((".xlsx", ".xls")):
-        df = pd.read_excel(path)
+        df = pd.read_excel(path, engine="openpyxl")
     else:
         df = pd.read_csv(path)
+
 
     required = ["Source Title", "Active or Inactive", "ISSN", "EISSN"]
     missing = [c for c in required if c not in df.columns]
@@ -489,3 +486,4 @@ if run_btn:
             st.dataframe(hits[show_cols].head(50), use_container_width=True)
         else:
             st.write("无命中。")
+
